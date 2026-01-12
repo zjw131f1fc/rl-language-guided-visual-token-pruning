@@ -164,6 +164,7 @@ def evaluate_performance(policy, config, mllm, data_loader, logger):
         attention_mask = torch.ones(final_embeddings.shape[:2], dtype=torch.long, device=mllm.device)
         generated_text = mllm.generate_answer(final_embeddings, attention_mask)
         accuracy = 1.0 if gt_answer.lower() in generated_text.lower() else 0.0
+        print(f"GT: {gt_answer} | Pred: {generated_text} | Acc: {accuracy}")
 
         # 计算压缩率
         num_kept = np.sum((decisions == 1) & (valid_token_mask == 1))
