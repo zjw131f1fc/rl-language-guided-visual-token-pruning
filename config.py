@@ -5,7 +5,7 @@ from datetime import datetime
 # --- Global Settings ---
 os.environ["HF_HOME"] = "/data/users/zjw/huggingface_cache"
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-os.environ["CUDA_VISIBLE_DEVICES"] = "3,5,6"
+#os.environ["CUDA_VISIBLE_DEVICES"] = "4,5,6"
 
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -38,8 +38,8 @@ GAE_LAMBDA = 0.95
 REWARD_NORMALIZATION = True
 
 # --- Training Loop Settings ---
-EPOCHS = 5  # 增加训练轮次以保证收敛
-BATCH_SIZE = 8
+EPOCHS = 10  # 增加训练轮次以保证收敛
+BATCH_SIZE = 4
 BUFFER_SIZE = 8000
 STEP_PER_COLLECT = 1800  # 每次收集的步数
 STEP_PER_EPOCH = 6000    # 每轮的步数
