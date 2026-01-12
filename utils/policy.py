@@ -1,151 +1,377 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
 from tianshou.policy import PPOPolicy
-from tianshou.data import Batch
+from tianshou.data import Batch, ReplayBuffer, to_torch_as
+from tianshou.data.types import RolloutBatchProtocol
+from typing import Any
 
-class CompositeDistribution:
+
+class SharedAttentionModule(nn.Module):
     """
-    A custom distribution class for our composite action space.
-    Implements the full interface expected by Tianshou's framework.
+    共享注意力模块，作为策略网络和价值网络的共同特征提取器。
+    处理视觉token和文本查询的拼接序列。
     """
-    ndim = 1
+    def __init__(self, d_model, num_heads, dropout=0.1):
+        super().__init__()
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.head_dim = d_model // num_heads
 
-    def __init__(self, dist_select, dist_keep):
-        self.dist_select: torch.distributions.Categorical = dist_select
-        self.dist_keep: torch.distributions.Bernoulli = dist_keep
-        self._batch_size = len(self.dist_select.logits)
-        self._num_patches = self.dist_select.logits.shape[1]
-        self._possible_indices = torch.arange(
-            self._num_patches, device=self.dist_select.logits.device
-        ).float()
+        assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
 
-    def __len__(self):
-        return self._batch_size
+        # Multi-head self-attention
+        self.W_Q = nn.Linear(d_model, d_model)
+        self.W_K = nn.Linear(d_model, d_model)
+        self.W_V = nn.Linear(d_model, d_model)
+        self.W_O = nn.Linear(d_model, d_model)
 
-    def sample(self, sample_shape=torch.Size()):
-        if len(sample_shape) > 0:
-            raise NotImplementedError("Sample shape for composite distribution not implemented")
-        index = self.dist_select.sample()
-        all_decisions = self.dist_keep.sample()
-        batch_indices = torch.arange(self._batch_size, device=index.device)
-        specific_decision = all_decisions[batch_indices, index]
-        return torch.stack([index.float(), specific_decision], dim=1)
+        self.layer_norm = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
 
-    def log_prob(self, act):
-        index = act[:, 0].long()
-        decision = act[:, 1]
-        batch_indices = torch.arange(self._batch_size, device=index.device)
-        log_prob_select = self.dist_select.log_prob(index)
-        log_prob_keep_full = self.dist_keep.log_prob(
-            decision.unsqueeze(1).expand_as(self.dist_keep.logits)
-        )
-        log_prob_keep = log_prob_keep_full[batch_indices, index]
-        return log_prob_select + log_prob_keep
+    def forward(self, X, mask=None):
+        """
+        Args:
+            X: [batch_size, seq_len, d_model] - 拼接后的视觉token和查询
+            mask: [batch_size, seq_len] - 有效token掩码 (1=有效, 0=无效)
+        Returns:
+            Z: [batch_size, seq_len, d_model] - 注意力输出
+        """
+        batch_size, seq_len, _ = X.shape
 
-    def entropy(self):
-        entropy_select = self.dist_select.entropy()
-        entropy_keep_per_token = self.dist_keep.entropy()
-        probs_select = self.dist_select.probs
-        entropy_conditional_keep = (probs_select * entropy_keep_per_token).sum(dim=-1)
-        return entropy_select + entropy_conditional_keep
+        # Linear projections
+        Q = self.W_Q(X)  # [B, L, d]
+        K = self.W_K(X)  # [B, L, d]
+        V = self.W_V(X)  # [B, L, d]
 
-    @property
-    def mean(self) -> torch.Tensor:
-        probs_select = self.dist_select.probs
-        mean_select = (probs_select * self._possible_indices).sum(dim=-1)
-        probs_keep = self.dist_keep.probs
-        mean_keep = (probs_select * probs_keep).sum(dim=-1)
-        return torch.stack([mean_select, mean_keep], dim=-1)
+        # Reshape for multi-head attention
+        Q = Q.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        K = K.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        V = V.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
 
-    @property
-    def stddev(self) -> torch.Tensor:
-        probs_select = self.dist_select.probs
-        mean_select = (probs_select * self._possible_indices).sum(dim=-1, keepdim=True)
-        var_select = (probs_select * (self._possible_indices - mean_select) ** 2).sum(dim=-1)
-        std_select = torch.sqrt(var_select)
-        probs_keep = self.dist_keep.probs
-        std_keep_per_token = torch.sqrt(probs_keep * (1.0 - probs_keep))
-        expected_std_keep = (probs_select * std_keep_per_token).sum(dim=-1)
-        return torch.stack([std_select, expected_std_keep], dim=-1)
+        # Scaled dot-product attention
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / (self.head_dim ** 0.5)
+
+        # Apply mask if provided
+        if mask is not None:
+            # mask: [B, L] -> [B, 1, 1, L] for broadcasting
+            mask = mask.unsqueeze(1).unsqueeze(2)
+            scores = scores.masked_fill(mask == 0, float('-inf'))
+
+        attn_weights = F.softmax(scores, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+
+        # Apply attention to values
+        attn_output = torch.matmul(attn_weights, V)
+
+        # Reshape and project
+        attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, self.d_model)
+        attn_output = self.W_O(attn_output)
+
+        # Residual connection and layer norm
+        Z = self.layer_norm(X + self.dropout(attn_output))
+
+        return Z
 
 
 class PolicyValueNet(nn.Module):
     """
-    The policy and value network for the PPO agent.
+    策略和价值网络，使用共享注意力模块。
+
+    策略网络：输出每个token的保留概率 pt,i = σ(w⊤gi + b)
+    价值网络：全局平均池化后输出标量价值
     """
-    def __init__(self, vision_dim, text_dim, hidden_dim, max_num_patches):
+    def __init__(self, vision_dim, hidden_dim, num_heads=8, dropout=0.1):
         super().__init__()
-        self.max_num_patches = max_num_patches
-        self.fusion_ffn = nn.Sequential(
-            nn.Linear(vision_dim + text_dim + vision_dim, hidden_dim), nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-        )
-        self.select_w_h = nn.Linear(hidden_dim, hidden_dim)
-        self.select_w_m = nn.Linear(self.max_num_patches, hidden_dim)
-        self.select_w = nn.Linear(hidden_dim, 1)
-        self.keep_head = nn.Linear(hidden_dim, 1)
-        self.critic_head = nn.Linear(hidden_dim, 1)
+        self.vision_dim = vision_dim
+        self.hidden_dim = hidden_dim
+
+        # 查询嵌入投影层（将查询对齐到视觉特征维度）
+        self.query_proj = nn.Linear(vision_dim, hidden_dim)
+
+        # 视觉特征投影层
+        self.vision_proj = nn.Linear(vision_dim, hidden_dim)
+
+        # 共享注意力模块
+        self.shared_attention = SharedAttentionModule(hidden_dim, num_heads, dropout)
+
+        # === 策略网络头部 ===
+        # fi = GELU(W1*zi + b1)
+        self.policy_W1 = nn.Linear(hidden_dim, hidden_dim)
+        # gi = LayerNorm(zi + W2*fi + b2)
+        self.policy_W2 = nn.Linear(hidden_dim, hidden_dim)
+        self.policy_ln = nn.LayerNorm(hidden_dim)
+        # pt,i = σ(w⊤gi + b)
+        self.policy_head = nn.Linear(hidden_dim, 1)
+
+        # === 价值网络头部 ===
+        # v = GELU(U1*z̄ + c1)
+        self.value_U1 = nn.Linear(hidden_dim, hidden_dim)
+        # V(st) = u⊤LayerNorm(z̄ + U2*v + c2) + bv
+        self.value_U2 = nn.Linear(hidden_dim, hidden_dim)
+        self.value_ln = nn.LayerNorm(hidden_dim)
+        self.value_head = nn.Linear(hidden_dim, 1)
 
     def forward(self, obs, state=None, info={}):
-        is_batch_object = not isinstance(obs, dict)
+        """
+        Args:
+            obs: 观察字典，包含:
+                - visual_features: [B, N, d] 视觉token特征
+                - query_embeddings: [B, 1, d] 查询嵌入
+                - valid_token_mask: [B, N] 有效token掩码
+        Returns:
+            logits: [B, N] 每个token的保留logits
+            value: [B] 状态价值
+        """
         device = next(self.parameters()).device
-        
-        visual_features = torch.as_tensor(obs.visual_features if is_batch_object else obs["visual_features"], dtype=torch.float32, device=device)
-        query_embeddings = torch.as_tensor(obs.query_embeddings if is_batch_object else obs["query_embeddings"], dtype=torch.float32, device=device)
-        pruning_mask = torch.as_tensor(obs.pruning_mask if is_batch_object else obs["pruning_mask"], dtype=torch.float32, device=device)
-        
-        batch_size, num_patches, _ = visual_features.shape
-        q_expanded = query_embeddings.squeeze(1).expand(-1, num_patches, -1)
-        
-        h_odot_q = visual_features * q_expanded
-        fusion_input = torch.cat([visual_features, q_expanded, h_odot_q], dim=-1)
-        hfuse = self.fusion_ffn(fusion_input)
-        
-        mask_context = self.select_w_m(pruning_mask).unsqueeze(1)
-        e_hidden = torch.tanh(self.select_w_h(hfuse) + mask_context)
-        
-        select_logits = self.select_w(e_hidden).squeeze(-1)
-        keep_logits = self.keep_head(hfuse).squeeze(-1)
-        
-        non_pruned_mask = (pruning_mask != 0).float().unsqueeze(-1)
-        num_non_pruned = torch.clamp(non_pruned_mask.sum(dim=1), min=1)
-        sum_features = (hfuse * non_pruned_mask).sum(dim=1)
-        mean_features = sum_features / num_non_pruned
-        value = self.critic_head(mean_features)
-        
-        return (select_logits, keep_logits), value
 
-
-class CompositeActionPPO(PPOPolicy):
-    """
-    A PPO Policy modified to handle the composite action space.
-    """
-    def forward(self, batch, state=None, **kwargs):
-        (select_logits, keep_logits), value = self.actor(batch.obs)
-        
-        if isinstance(batch.obs, Batch):
-            pruning_mask = batch.obs.pruning_mask
-            valid_token_mask = batch.obs.valid_token_mask
+        # 处理输入
+        if isinstance(obs, Batch):
+            visual_features = torch.as_tensor(obs.visual_features, dtype=torch.float32, device=device)
+            query_embeddings = torch.as_tensor(obs.query_embeddings, dtype=torch.float32, device=device)
+            valid_token_mask = torch.as_tensor(obs.valid_token_mask, dtype=torch.float32, device=device)
         else:
-            pruning_mask = torch.tensor(batch.obs["pruning_mask"], device=select_logits.device)
-            valid_token_mask = torch.tensor(batch.obs["valid_token_mask"], device=select_logits.device)
+            visual_features = torch.as_tensor(obs["visual_features"], dtype=torch.float32, device=device)
+            query_embeddings = torch.as_tensor(obs["query_embeddings"], dtype=torch.float32, device=device)
+            valid_token_mask = torch.as_tensor(obs["valid_token_mask"], dtype=torch.float32, device=device)
 
-        undecided_mask = (pruning_mask == -1) & (valid_token_mask == 1)
-        select_logits[~undecided_mask] = -float('inf')
-        
-        dist_select = torch.distributions.Categorical(logits=select_logits)
-        dist_keep = torch.distributions.Bernoulli(logits=keep_logits)
-        
-        dist = CompositeDistribution(dist_select, dist_keep)
+        batch_size, num_patches, _ = visual_features.shape
+
+        # 投影到隐藏维度
+        visual_proj = self.vision_proj(visual_features)  # [B, N, hidden_dim]
+        query_proj = self.query_proj(query_embeddings.squeeze(1)).unsqueeze(1)  # [B, 1, hidden_dim]
+
+        # 拼接视觉token和查询: X = [Ht; q̃]
+        X = torch.cat([visual_proj, query_proj], dim=1)  # [B, N+1, hidden_dim]
+
+        # 构建注意力掩码（包含查询token）
+        query_mask = torch.ones(batch_size, 1, device=device)
+        attn_mask = torch.cat([valid_token_mask, query_mask], dim=1)  # [B, N+1]
+
+        # 共享注意力模块
+        Z = self.shared_attention(X, attn_mask)  # [B, N+1, hidden_dim]
+
+        # 分离视觉token和查询token的输出
+        Z_visual = Z[:, :num_patches, :]  # [B, N, hidden_dim]
+
+        # === 策略网络 ===
+        # fi = GELU(W1*zi + b1)
+        fi = F.gelu(self.policy_W1(Z_visual))
+        # gi = LayerNorm(zi + W2*fi + b2) - 残差连接
+        gi = self.policy_ln(Z_visual + self.policy_W2(fi))
+        # pt,i的logits（sigmoid在外部应用）
+        logits = self.policy_head(gi).squeeze(-1)  # [B, N]
+
+        # === 价值网络 ===
+        # 全局平均池化（只对有效token）
+        valid_mask_expanded = valid_token_mask.unsqueeze(-1)  # [B, N, 1]
+        num_valid = valid_token_mask.sum(dim=1, keepdim=True).clamp(min=1)  # [B, 1]
+        z_bar = (Z_visual * valid_mask_expanded).sum(dim=1) / num_valid  # [B, hidden_dim]
+
+        # v = GELU(U1*z̄ + c1)
+        v = F.gelu(self.value_U1(z_bar))
+        # V(st) = u⊤LayerNorm(z̄ + U2*v + c2) + bv - 残差连接
+        value_input = self.value_ln(z_bar + self.value_U2(v))
+        value = self.value_head(value_input).squeeze(-1)  # [B]
+
+        return logits, value
+
+    def get_probs(self, obs):
+        """获取每个token的保留概率"""
+        logits, _ = self.forward(obs)
+        return torch.sigmoid(logits)
+
+    def load_pretrain_weights(self, path):
+        """加载预训练权重"""
+        state_dict = torch.load(path, map_location='cpu')
+        self.load_state_dict(state_dict, strict=False)
+        print(f"Loaded pretrain weights from {path}")
+
+
+class BernoulliActionDistribution:
+    """
+    伯努利分布，用于处理每个token的二元决策。
+    """
+    def __init__(self, logits, valid_mask):
+        """
+        Args:
+            logits: [B, N] 每个token的保留logits
+            valid_mask: [B, N] 有效token掩码
+        """
+        self.logits = logits
+        self.valid_mask = valid_mask
+        self.probs = torch.sigmoid(logits)
+        self._dist = torch.distributions.Bernoulli(logits=logits)
+
+    def sample(self):
+        """采样动作: 每个token的保留/剪枝决策"""
+        actions = self._dist.sample()  # [B, N]
+        # 无效token强制设为0（剪枝）
+        actions = actions * self.valid_mask
+        return actions
+
+    def log_prob(self, actions):
+        """计算动作的对数概率"""
+        # 只计算有效token的log_prob
+        log_probs = self._dist.log_prob(actions)  # [B, N]
+        # 对有效token的log_prob求和
+        log_probs = (log_probs * self.valid_mask).sum(dim=-1)  # [B]
+        return log_probs
+
+    def entropy(self):
+        """计算熵（用于探索）"""
+        ent = self._dist.entropy()  # [B, N]
+        # 只计算有效token的熵
+        ent = (ent * self.valid_mask).sum(dim=-1)  # [B]
+        return ent
+
+
+class TokenPruningPPO(PPOPolicy):
+    """
+    用于Token剪枝的PPO策略。
+    动作空间：对所有token同时做二元决策。
+    """
+    def __init__(
+        self,
+        *,
+        actor: PolicyValueNet,
+        optim: torch.optim.Optimizer,
+        config,
+        **kwargs
+    ):
+        # 创建一个虚拟的critic（实际使用actor内部的value head）
+        self.config = config
+
+        # 调用父类初始化，但我们会覆盖大部分行为
+        super().__init__(
+            actor=actor,
+            critic=CriticWrapper(actor),
+            optim=optim,
+            dist_fn=lambda *args: None,  # 我们自己处理分布
+            action_space=None,
+            action_scaling=False,
+            **kwargs
+        )
+
+    def forward(self, batch, state=None, **kwargs):
+        """前向传播，返回动作和分布"""
+        logits, value = self.actor(batch.obs)
+
+        # 获取有效token掩码
+        if isinstance(batch.obs, Batch):
+            valid_mask = torch.as_tensor(
+                batch.obs.valid_token_mask,
+                dtype=torch.float32,
+                device=logits.device
+            )
+        else:
+            valid_mask = torch.as_tensor(
+                batch.obs["valid_token_mask"],
+                dtype=torch.float32,
+                device=logits.device
+            )
+
+        # 创建分布
+        dist = BernoulliActionDistribution(logits, valid_mask)
+
+        # 采样动作
         act = dist.sample()
-        
-        return Batch(act=act, state=state, dist=dist, value=value.flatten())
+
+        return Batch(act=act, state=state, dist=dist, logits=logits, value=value.flatten())
+
+    def learn(self, batch: RolloutBatchProtocol, batch_size: int | None, repeat: int, *args, **kwargs):
+        """PPO学习步骤"""
+        losses, clip_losses, vf_losses, ent_losses = [], [], [], []
+
+        for _ in range(repeat):
+            for minibatch in batch.split(batch_size or len(batch), merge_last=True):
+                # 前向传播
+                logits, value = self.actor(minibatch.obs)
+
+                # 获取有效token掩码
+                if isinstance(minibatch.obs, Batch):
+                    valid_mask = torch.as_tensor(
+                        minibatch.obs.valid_token_mask,
+                        dtype=torch.float32,
+                        device=logits.device
+                    )
+                else:
+                    valid_mask = torch.as_tensor(
+                        minibatch.obs["valid_token_mask"],
+                        dtype=torch.float32,
+                        device=logits.device
+                    )
+
+                # 创建分布
+                dist = BernoulliActionDistribution(logits, valid_mask)
+
+                # 计算新的log_prob
+                act = to_torch_as(minibatch.act, logits)
+                log_prob = dist.log_prob(act)
+
+                # 计算ratio
+                old_log_prob = to_torch_as(minibatch.logp_old, log_prob)
+                ratio = (log_prob - old_log_prob).exp()
+
+                # 优势归一化
+                adv = to_torch_as(minibatch.adv, ratio)
+                if self.norm_adv:
+                    adv = (adv - adv.mean()) / (adv.std() + 1e-8)
+
+                # PPO裁剪损失
+                surr1 = ratio * adv
+                surr2 = ratio.clamp(1 - self.eps_clip, 1 + self.eps_clip) * adv
+                clip_loss = -torch.min(surr1, surr2).mean()
+
+                # 价值损失
+                returns = to_torch_as(minibatch.returns, value)
+                vf_loss = F.mse_loss(value.flatten(), returns)
+
+                # 熵损失
+                ent_loss = dist.entropy().mean()
+
+                # 总损失
+                loss = clip_loss + self.vf_coef * vf_loss - self.ent_coef * ent_loss
+
+                # 反向传播
+                self.optim.zero_grad()
+                loss.backward()
+                if self.max_grad_norm:
+                    nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
+                self.optim.step()
+
+                losses.append(loss.item())
+                clip_losses.append(clip_loss.item())
+                vf_losses.append(vf_loss.item())
+                ent_losses.append(ent_loss.item())
+
+        return {
+            "loss": np.mean(losses),
+            "clip_loss": np.mean(clip_losses),
+            "vf_loss": np.mean(vf_losses),
+            "ent_loss": np.mean(ent_losses),
+        }
+
+    def process_fn(self, batch: RolloutBatchProtocol, buffer: ReplayBuffer, indices: np.ndarray):
+        """处理收集的数据，计算GAE"""
+        # 计算returns和advantages
+        batch = self._compute_returns(batch, buffer, indices)
+
+        # 计算旧的log_prob
+        batch.act = to_torch_as(batch.act, batch.v_s)
+        with torch.no_grad():
+            logp_old = []
+            for minibatch in batch.split(256, shuffle=False, merge_last=True):
+                result = self(minibatch)
+                logp_old.append(result.dist.log_prob(minibatch.act))
+            batch.logp_old = torch.cat(logp_old, dim=0)
+
+        return batch
 
 
 class CriticWrapper(nn.Module):
-    """
-    A wrapper for the critic network, ensuring it only returns the value.
-    """
+    """价值网络包装器"""
     def __init__(self, actor_critic_net):
         super().__init__()
         self.net = actor_critic_net
