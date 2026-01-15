@@ -45,7 +45,7 @@ def main():
     # Log configuration
     logger.info(f"Algorithm: {'GRPO' if config.USE_GRPO else 'PPO'}")
     logger.info(f"Training patches: {config.TRAIN_NUM_PATCHES} (image size: {config.TRAIN_IMAGE_SIZE})")
-    logger.info(f"Max pruning rounds: {config.T_MAX}")
+    logger.info(f"Decision steps: {config.NUM_DECISION_STEPS}")
     logger.info(f"Training threshold: {config.TRAIN_THRESHOLD}")
     logger.info(f"Random masking: {config.ENABLE_RANDOM_MASK} (ratio: {config.RANDOM_MASK_RATIO})")
 
@@ -62,7 +62,8 @@ def main():
 
     # 3. Setup RL Environment and Policy
     logger.info("\n--- 3. Setting up RL Environment and Policy ---")
-    train_envs, test_envs = setup_environments(config, mllm, data_loader)
+    train_env, num_patches = setup_environments(config, mllm, data_loader)
+    logger.info(f"Actual num_patches: {num_patches}")
 
     if config.USE_GRPO:
         # Use GRPO algorithm
@@ -71,12 +72,12 @@ def main():
         logger.info("GRPO policy initialized (no value network).")
     else:
         # Use PPO algorithm
-        policy = setup_policy(config, mllm, train_envs)
+        policy = setup_policy(config, mllm, num_patches)
         logger.info("PPO policy initialized.")
 
     # 4. Train the Agent
     logger.info("\n--- 4. Starting Agent Training ---")
-    trained_policy = train_agent(config, policy, train_envs, test_envs)
+    trained_policy = train_agent(config, policy, train_env, mllm=mllm, data_loader=data_loader)
     logger.info("Agent training finished.")
 
     # Save the trained policy

@@ -5,7 +5,7 @@ from datetime import datetime
 # --- Global Settings ---
 os.environ["HF_HOME"] = "/data/users/zjw/huggingface_cache"
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-#os.environ["CUDA_VISIBLE_DEVICES"] = "4,5,6"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1,4"
 
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -28,15 +28,15 @@ BETA = 0.5   # Efficiency reward weight
 # --- Training Image Settings ---
 # 训练时使用固定分辨率，确保每个样本的视觉token数量相同
 TRAIN_IMAGE_SIZE = 224  # 训练时图像分辨率 224x224
-TRAIN_NUM_PATCHES = 196  # 训练时固定的视觉token数量 (224/16)^2 = 196
+TRAIN_NUM_PATCHES = None  # 训练时的视觉token数量，None表示从第一个样本动态获取
 
 # --- Multi-round Pruning Settings ---
-T_MAX = 5  # 每个样本的最大剪枝轮数
+NUM_DECISION_STEPS = 5  # 决策步数（训练和推理一致）
 TRAIN_THRESHOLD = 0.7  # 训练时的剪枝阈值 τ_train
 
 # --- Random Masking Settings ---
-ENABLE_RANDOM_MASK = True  # 是否在第一轮剪枝前启用随机掩码
-RANDOM_MASK_RATIO = 0.2  # 随机掩码的比例（掩码掉20%的token）
+ENABLE_RANDOM_MASK = False  # 禁用随机掩码（随机初始化的policy已经会剪枝约一半token）
+RANDOM_MASK_RATIO = 0.2  # 随机掩码的比例（当前已禁用）
 
 # --- Policy Network Architecture ---
 HIDDEN_DIM = 512  # 隐藏层维度
@@ -59,11 +59,11 @@ GRPO_GROUP_SIZE = 4  # GRPO组内样本数量
 # --- Training Loop Settings ---
 EPOCHS = 10
 BATCH_SIZE = 4  # 环境批量大小（同时处理的样本数）
-BUFFER_SIZE = 8000
-STEP_PER_COLLECT = 1800
-STEP_PER_EPOCH = 6000
+BUFFER_SIZE = 500
+STEP_PER_COLLECT = 10
+STEP_PER_EPOCH = 100
 REPEAT_PER_COLLECT = 2
-NUM_TRAIN_ENVS = 5
+NUM_TRAIN_ENVS = 1
 NUM_TEST_ENVS = 1
 EPISODE_PER_TEST = 10
 
@@ -71,6 +71,7 @@ EPISODE_PER_TEST = 10
 THRESHOLD = 0.5  # 推理时的Token保留阈值（可调节以平衡效率和精度）
 
 # --- Evaluation Settings ---
+EVAL_INTERVAL = 5  # 每隔多少个epoch进行一次评估，0表示不评估
 EVAL_MODE = "full"  # 可选值："full", "budget", "none"
 EVAL_BUDGET_RATIO = 0.5  # 仅在 EVAL_MODE=="budget" 时生效
 
