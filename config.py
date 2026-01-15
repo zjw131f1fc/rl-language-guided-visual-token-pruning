@@ -57,7 +57,7 @@ USE_GRPO = False  # 是否使用GRPO替代PPO（GRPO不需要价值网络）
 GRPO_GROUP_SIZE = 4  # GRPO组内样本数量
 
 # --- Training Loop Settings ---
-EPOCHS = 10
+EPOCHS = 5
 BATCH_SIZE = 4  # 环境批量大小（同时处理的样本数）
 BUFFER_SIZE = 500
 STEP_PER_COLLECT = 10
@@ -71,9 +71,8 @@ EPISODE_PER_TEST = 10
 THRESHOLD = 0.5  # 推理时的Token保留阈值（可调节以平衡效率和精度）
 
 # --- Evaluation Settings ---
-EVAL_INTERVAL = 5  # 每隔多少个epoch进行一次评估，0表示不评估
-EVAL_MODE = "full"  # 可选值："full", "budget", "none"
-EVAL_BUDGET_RATIO = 0.5  # 仅在 EVAL_MODE=="budget" 时生效
+EVAL_INTERVAL = 1  # 每隔多少个epoch进行一次评估，0表示不评估
+EVAL_MODE = "threshold"  # 可选值："threshold"(阈值剪枝), "none"(不剪枝)
 
 # --- Pretrain Settings ---
 PRETRAIN_WEIGHTS_PATH = None  # 预训练权重路径，None表示从头训练

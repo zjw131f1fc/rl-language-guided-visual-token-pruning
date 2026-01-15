@@ -94,16 +94,11 @@ def main():
     evaluate_performance(trained_policy, config, mllm, data_loader, logger)
 
     # Evaluate with threshold-based pruning
-    logger.info("\n[Full Pruning with Threshold]")
-    config.EVAL_MODE = "full"
+    logger.info("\n[Threshold Pruning]")
+    config.EVAL_MODE = "threshold"
     evaluate_performance(trained_policy, config, mllm, data_loader, logger)
 
-    # Evaluate with budget-based pruning
-    logger.info("\n[Budget-based Pruning]")
-    config.EVAL_MODE = "budget"
-    evaluate_performance(trained_policy, config, mllm, data_loader, logger)
-
-    # Evaluate with multiple thresholds to generate efficiency-accuracy curve
+    # Evaluate with multiple thresholds
     logger.info("\n[Multi-threshold Evaluation]")
     evaluate_with_different_thresholds(
         trained_policy, config, mllm, data_loader, logger,
