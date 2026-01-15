@@ -32,11 +32,10 @@ TRAIN_NUM_PATCHES = None  # 训练时的视觉token数量，None表示从第一�
 
 # --- Multi-round Pruning Settings ---
 NUM_DECISION_STEPS = 5  # 决策步数（训练和推理一致）
-TRAIN_THRESHOLD = 0.7  # 训练时的剪枝阈值 τ_train
 
 # --- Random Masking Settings ---
-ENABLE_RANDOM_MASK = False  # 禁用随机掩码（随机初始化的policy已经会剪枝约一半token）
-RANDOM_MASK_RATIO = 0.2  # 随机掩码的比例（当前已禁用）
+ENABLE_RANDOM_MASK = False  # 是否启用随机掩码
+RANDOM_MASK_RATIO = 0.0  # 随机掩码的比例
 
 # --- Policy Network Architecture ---
 HIDDEN_DIM = 512  # 隐藏层维度
@@ -63,9 +62,6 @@ BUFFER_SIZE = 500
 STEP_PER_COLLECT = 50
 STEP_PER_EPOCH = 200
 REPEAT_PER_COLLECT = 2
-NUM_TRAIN_ENVS = 1
-NUM_TEST_ENVS = 1
-EPISODE_PER_TEST = 10
 
 # --- Inference Settings ---
 THRESHOLD = 0.5  # 推理时的Token保留阈值（可调节以平衡效率和精度）

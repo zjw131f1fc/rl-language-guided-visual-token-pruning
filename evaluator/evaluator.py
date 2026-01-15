@@ -62,8 +62,8 @@ def evaluate_policy(config, policy, mllm, data_loader, num_samples=50):
         results["threshold"]["kept"] += result_threshold['num_kept']
         results["threshold"]["total"] += result_threshold['num_original']
 
-        # 打印前10个样本的详细信息
-        if sample_idx <= 10:
+        # 打印前5个样本的详细信息
+        if sample_idx <= 5:
             print(f"  [{sample_idx}] Q: {question[:50]}...")
             print(f"       GT: '{gt_answer}' | baseline: '{result_none['generated']}' | pruned: '{result_threshold['generated']}'")
             print(f"       baseline_acc={result_none['accuracy']:.0f} | pruned_acc={result_threshold['accuracy']:.0f} | keep={result_threshold['num_kept']}/{result_threshold['num_original']}")

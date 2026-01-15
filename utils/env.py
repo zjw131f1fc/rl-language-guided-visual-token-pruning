@@ -65,7 +65,6 @@ class BatchMLLMTokenPruningEnv(gym.Env):
 
         # 多步决策设置
         self.num_decision_steps = config.NUM_DECISION_STEPS
-        self.train_threshold = config.TRAIN_THRESHOLD
         self.enable_random_mask = config.ENABLE_RANDOM_MASK
         self.random_mask_ratio = config.RANDOM_MASK_RATIO
 
@@ -203,14 +202,14 @@ class BatchMLLMTokenPruningEnv(gym.Env):
             dtype=torch.long, device=self.device
         )
 
-        #
-        # if self.is_training and self.enable_random_mask:
-        #     num_to_mask = int(self.num_patches * self.random_mask_ratio)
-        #     if num_to_mask > 0:
-        #         for b in range(self.batch_size):
-        #             mask_indices = random.sample(range(self.num_patches), num_to_mask)
-        #             self.batch_active_masks[b, mask_indices] = False
-        #         self.batch_num_tokens = self.batch_active_masks.sum(dim=1)
+        # 随机掩码（可选）
+        if self.is_training and self.enable_random_mask:
+            num_to_mask = int(self.num_patches * self.random_mask_ratio)
+            if num_to_mask > 0:
+                for b in range(self.batch_size):
+                    mask_indices = random.sample(range(self.num_patches), num_to_mask)
+                    self.batch_active_masks[b, mask_indices] = False
+                self.batch_num_tokens = self.batch_active_masks.sum(dim=1)
 
         # Compute initial task scores
         self.batch_prev_scores = self._compute_batch_task_scores()
