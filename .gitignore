@@ -9,4 +9,4 @@ models/__pycache__/
 utils/__pycache__/
 trainer/__pycache__/
 logs/
-
+start_claude.sh

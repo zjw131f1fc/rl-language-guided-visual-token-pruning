@@ -66,7 +66,8 @@ def evaluate_policy(config, policy, mllm, data_loader, num_samples=50):
         if sample_idx <= 5:
             print(f"  [{sample_idx}] Q: {question[:50]}...")
             print(f"       GT: '{gt_answer}' | baseline: '{result_none['generated']}' | pruned: '{result_threshold['generated']}'")
-            print(f"       baseline_acc={result_none['accuracy']:.0f} | pruned_acc={result_threshold['accuracy']:.0f} | keep={result_threshold['num_kept']}/{result_threshold['num_original']}")
+            print(f"       baseline: keep={result_none['num_kept']}/{result_none['num_original']} acc={result_none['accuracy']:.0f}")
+            print(f"       pruned:   keep={result_threshold['num_kept']}/{result_threshold['num_original']} acc={result_threshold['accuracy']:.0f}")
 
     # 恢复原始模式
     config.EVAL_MODE = original_mode

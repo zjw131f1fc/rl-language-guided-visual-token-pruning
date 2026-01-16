@@ -46,7 +46,6 @@ def main():
     logger.info(f"Algorithm: {'GRPO' if config.USE_GRPO else 'PPO'}")
     logger.info(f"Training patches: {config.TRAIN_NUM_PATCHES} (image size: {config.TRAIN_IMAGE_SIZE})")
     logger.info(f"Decision steps: {config.NUM_DECISION_STEPS}")
-    logger.info(f"Training threshold: {config.TRAIN_THRESHOLD}")
     logger.info(f"Random masking: {config.ENABLE_RANDOM_MASK} (ratio: {config.RANDOM_MASK_RATIO})")
 
     # 1. Load Data

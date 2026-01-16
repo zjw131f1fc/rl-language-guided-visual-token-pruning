@@ -15,7 +15,9 @@ from tianshou.data import Batch, ReplayBuffer, to_torch_as
 from tianshou.policy import BasePolicy
 from tianshou.data.types import RolloutBatchProtocol
 from typing import Any, Dict, Optional
+from gymnasium import spaces
 
+from tianshou.policy.modelfree.ppo import PPOTrainingStats
 from utils.policy import PolicyValueNet, BernoulliActionDistribution
 
 
@@ -32,6 +34,7 @@ class GRPOPolicy(BasePolicy):
         actor: PolicyValueNet,
         optim: torch.optim.Optimizer,
         config,
+        action_space: spaces.Space,
         eps_clip: float = 0.2,
         group_size: int = 4,
         ent_coef: float = 0.01,
@@ -39,7 +42,7 @@ class GRPOPolicy(BasePolicy):
         deterministic_eval: bool = True,
         **kwargs
     ):
-        super().__init__(**kwargs)
+        super().__init__(action_space=action_space, **kwargs)
         self.actor = actor
         self.optim = optim
         self.config = config
@@ -54,19 +57,19 @@ class GRPOPolicy(BasePolicy):
         # 只使用actor的策略输出，忽略value
         logits, _ = self.actor(batch.obs)
 
-        # 获取有效token掩码
+        # 获取有效token掩码（需要flatten以匹配logits的形状）
         if isinstance(batch.obs, Batch):
             valid_mask = torch.as_tensor(
                 batch.obs.valid_token_mask,
                 dtype=torch.float32,
                 device=logits.device
-            )
+            ).flatten()
         else:
             valid_mask = torch.as_tensor(
                 batch.obs["valid_token_mask"],
                 dtype=torch.float32,
                 device=logits.device
-            )
+            ).flatten()
 
         # 创建分布
         dist = BernoulliActionDistribution(logits, valid_mask)
@@ -78,7 +81,12 @@ class GRPOPolicy(BasePolicy):
         else:
             act = dist.sample()
 
-        return Batch(act=act, state=state, dist=dist, logits=logits)
+        # 保持 [num_envs, action_dim] 的形状给 Tianshou
+        act = act.unsqueeze(0)
+
+        # 不返回 dist 对象，因为 Tianshou 的 Batch 无法处理它
+        # 保存 logits 和 valid_mask 用于后续计算 log_prob
+        return Batch(act=act, state=state, logits=logits, valid_mask=valid_mask)
 
     def process_fn(
         self,
@@ -92,13 +100,15 @@ class GRPOPolicy(BasePolicy):
         GRPO优势：Â = (r - μ_group) / (σ_group + ε)
         """
         # 计算旧的log_prob
-        batch.act = to_torch_as(batch.act, torch.zeros(1))
-
         with torch.no_grad():
             logp_old = []
             for minibatch in batch.split(256, shuffle=False, merge_last=True):
                 result = self(minibatch)
-                logp_old.append(result.dist.log_prob(minibatch.act))
+                # 使用logits和valid_mask重建分布
+                dist = BernoulliActionDistribution(result.logits, result.valid_mask)
+                # 确保action在正确的设备上
+                act = to_torch_as(minibatch.act, result.logits)
+                logp_old.append(dist.log_prob(act).unsqueeze(0))
             batch.logp_old = torch.cat(logp_old, dim=0)
 
         # 计算GRPO优势
@@ -211,11 +221,13 @@ class GRPOPolicy(BasePolicy):
                 clip_losses.append(clip_loss.item())
                 ent_losses.append(ent_loss.item())
 
-        return {
-            "loss": np.mean(losses),
-            "clip_loss": np.mean(clip_losses),
-            "ent_loss": np.mean(ent_losses),
-        }
+        return PPOTrainingStats.from_sequences(
+            losses=losses,
+            clip_losses=clip_losses,
+            vf_losses=[0.0] * len(losses),  # GRPO不使用value loss
+            ent_losses=ent_losses,
+            gradient_steps=len(losses),
+        )
 
     def update(
         self,
@@ -256,11 +268,16 @@ def create_grpo_policy(config, mllm):
     # 创建优化器
     optimizer = torch.optim.Adam(net.parameters(), lr=config.LR)
 
+    # 创建动作空间（与PPO一致）
+    action_dim = config.BATCH_SIZE * config.MAX_PATCHES
+    action_space = spaces.MultiBinary(action_dim)
+
     # 创建GRPO策略
     policy = GRPOPolicy(
         actor=net,
         optim=optimizer,
         config=config,
+        action_space=action_space,
         eps_clip=config.EPS_CLIP,
         group_size=config.GRPO_GROUP_SIZE,
         ent_coef=config.ENT_COEF,

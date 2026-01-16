@@ -5,7 +5,7 @@ from datetime import datetime
 # --- Global Settings ---
 os.environ["HF_HOME"] = "/data/users/zjw/huggingface_cache"
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-os.environ["CUDA_VISIBLE_DEVICES"] = "1,4"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1,3"
 
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -52,7 +52,7 @@ GAE_LAMBDA = 0.95
 REWARD_NORMALIZATION = True
 
 # --- GRPO Settings ---
-USE_GRPO = False  # 是否使用GRPO替代PPO（GRPO不需要价值网络）
+USE_GRPO = True  # 是否使用GRPO替代PPO（GRPO不需要价值网络）
 GRPO_GROUP_SIZE = 4  # GRPO组内样本数量
 
 # --- Training Loop Settings ---
